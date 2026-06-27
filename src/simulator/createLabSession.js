@@ -6,6 +6,7 @@ export function createLabSession({ questions, initialCluster }) {
   let files = createFileSystem(questions);
   let cwd = "/home/candidate";
   let context = "k8s-admin@sim-cluster";
+  let editor = null;
 
   function getSnapshot() {
     return {
@@ -13,7 +14,8 @@ export function createLabSession({ questions, initialCluster }) {
       files: structuredClone(files),
       cwd,
       context,
-      prompt: `candidate@cka:${cwd}$`,
+      editor: editor ? structuredClone(editor) : null,
+      prompt: editor ? `vim:${editor.path} [${editor.mode}]` : `candidate@cka:${cwd}$`,
     };
   }
 
@@ -24,23 +26,27 @@ export function createLabSession({ questions, initialCluster }) {
       files,
       cwd,
       context,
+      editor,
     });
     cluster = result.cluster;
     files = result.files;
     cwd = result.cwd;
     context = result.context;
+    editor = result.editor ?? null;
     return {
       command,
       output: result.output,
       cwd,
-      prompt: `candidate@cka:${cwd}$`,
+      prompt: editor ? `vim:${editor.path} [${editor.mode}]` : `candidate@cka:${cwd}$`,
       cluster: structuredClone(cluster),
       files: structuredClone(files),
+      editor: editor ? structuredClone(editor) : null,
     };
   }
 
   function resetQuestion(questionId) {
     files = resetFilesForQuestion(files, questions.find((question) => question.id === questionId));
+    editor = null;
   }
 
   return {

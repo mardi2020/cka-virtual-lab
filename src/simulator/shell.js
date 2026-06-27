@@ -11,8 +11,6 @@ import {
 } from "./filesystem.js";
 import { runKubectl } from "./kubectl.js";
 
-const EDITOR_GUIDANCE =
-  "Interactive editors are not available in this browser-only simulator. Use: cat <<EOF > file.yaml ... EOF";
 const SUPPORTED_COMMANDS = [
   "help",
   "clear",
@@ -31,8 +29,11 @@ const SUPPORTED_COMMANDS = [
   "kubectl/k",
 ];
 
-export function runShellCommand({ command, cluster, files, cwd, context }) {
-  const commandText = String(command ?? "").replace(/\r\n/g, "\n").trimEnd();
+export function runShellCommand({ command, cluster, files, cwd, context, editor = null }) {
+  const rawCommandText = String(command ?? "").replace(/\r\n/g, "\n");
+  if (editor) return runEditorCommand(rawCommandText, { cluster, files, cwd, context, editor });
+
+  const commandText = rawCommandText.trimEnd();
   const heredoc = parseHeredoc(commandText, cwd);
   if (heredoc) {
     return writeFile({ cluster, files, cwd, context }, heredoc.path, heredoc.content, false);
@@ -74,12 +75,102 @@ export function runShellCommand({ command, cluster, files, cwd, context }) {
   if (name === "mkdir") return runMkdir(args, cluster, files, cwd, context);
   if (name === "rm") return runRm(args, cluster, files, cwd, context);
   if (["vi", "vim", "nano"].includes(name)) {
-    const target = args[0] ? normalizePath(cwd, args[0]) : "file.yaml";
-    return ok(`${name}: ${EDITOR_GUIDANCE}\nTarget path: ${target}`, cluster, files, cwd, context);
+    return openEditor(name, args, cluster, files, cwd, context);
   }
   if (name === "systemctl") return runSystemctl(args, cluster, files, cwd, context);
   if (name === "journalctl") return runJournalctl(args, cluster, files, cwd, context);
   return ok(`${name}: command not found`, cluster, files, cwd, context);
+}
+
+function openEditor(name, args, cluster, files, cwd, context) {
+  const target = normalizePath(cwd, args.find((arg) => !arg.startsWith("-")) ?? "file.yaml");
+  const entry = files[target];
+  if (entry?.type === "dir") return ok(`${name}: ${target}: Is a directory`, cluster, files, cwd, context);
+
+  const editor = {
+    path: target,
+    mode: "normal",
+    buffer: entry?.type === "file" ? entry.content ?? "" : "",
+    dirty: false,
+    newFile: !entry,
+  };
+  return ok(renderEditor(editor, entry ? `"${basename(target)}"` : `"${basename(target)}" [New File]`), cluster, files, cwd, context, editor);
+}
+
+function runEditorCommand(commandText, state) {
+  if (state.editor.mode === "insert") return runEditorInsert(commandText, state);
+
+  const command = commandText.trim();
+  if (!command) return ok(renderEditor(state.editor, "-- NORMAL --"), state.cluster, state.files, state.cwd, state.context, state.editor);
+  if (command === "i" || command === "a") {
+    const editor = { ...state.editor, mode: "insert" };
+    return ok(renderEditor(editor, "-- INSERT --"), state.cluster, state.files, state.cwd, state.context, editor);
+  }
+  if (command === ":%d" || command === "ggdG" || command === "dG") {
+    const editor = { ...state.editor, buffer: "", dirty: true };
+    return ok(renderEditor(editor, "deleted all lines"), state.cluster, state.files, state.cwd, state.context, editor);
+  }
+  if (command === ":w") return saveEditor(state, false);
+  if (command === ":wq" || command === ":x" || command === "ZZ") return saveEditor(state, true);
+  if (command === ":q!") {
+    return ok(`"${basename(state.editor.path)}" aborted`, state.cluster, state.files, state.cwd, state.context, null);
+  }
+  if (command === ":q") {
+    if (state.editor.dirty) {
+      return ok(
+        "E37: No write since last change (add ! to override)",
+        state.cluster,
+        state.files,
+        state.cwd,
+        state.context,
+        state.editor,
+      );
+    }
+    return ok(`"${basename(state.editor.path)}" closed`, state.cluster, state.files, state.cwd, state.context, null);
+  }
+
+  return ok(`vim: ${command}: command not simulated`, state.cluster, state.files, state.cwd, state.context, state.editor);
+}
+
+function runEditorInsert(commandText, state) {
+  if (isEscapeCommand(commandText)) {
+    const editor = { ...state.editor, mode: "normal" };
+    return ok(renderEditor(editor, "-- NORMAL --"), state.cluster, state.files, state.cwd, state.context, editor);
+  }
+
+  const editor = {
+    ...state.editor,
+    buffer: `${state.editor.buffer}${commandText}`,
+    dirty: true,
+  };
+  return ok(renderEditor(editor, "-- INSERT --"), state.cluster, state.files, state.cwd, state.context, editor);
+}
+
+function saveEditor(state, closeAfterWrite) {
+  const result = writeFile(state, state.editor.path, state.editor.buffer, false);
+  if (result.output) {
+    return ok(result.output, state.cluster, state.files, state.cwd, state.context, state.editor);
+  }
+  const written = `"${basename(state.editor.path)}" written`;
+  if (closeAfterWrite) return ok(written, result.cluster, result.files, result.cwd, result.context, null);
+
+  const editor = { ...state.editor, dirty: false, newFile: false };
+  return ok(renderEditor(editor, written), result.cluster, result.files, result.cwd, result.context, editor);
+}
+
+function isEscapeCommand(commandText) {
+  return commandText === "\u001b" || ["esc", "escape", "<esc>"].includes(commandText.trim().toLowerCase());
+}
+
+function renderEditor(editor, status) {
+  const lines = editor.buffer.split("\n");
+  const numbered = lines
+    .slice(0, 16)
+    .map((line, index) => `${String(index + 1).padStart(4, " ")} ${line}`)
+    .join("\n");
+  const hidden = lines.length > 16 ? `\n... ${lines.length - 16} more line(s)` : "";
+  const body = numbered || "   1 ";
+  return [`${body}${hidden}`, status].join("\n");
 }
 
 export function tokenize(command) {
@@ -344,16 +435,16 @@ function runJournalctl(args, cluster, files, cwd, context) {
 function writeFile(state, path, content, append) {
   const nextFiles = structuredClone(state.files);
   const existing = nextFiles[path];
-  if (existing?.type === "dir") return ok(`${path}: Is a directory`, state.cluster, state.files, state.cwd, state.context);
+  if (existing?.type === "dir") return ok(`${path}: Is a directory`, state.cluster, state.files, state.cwd, state.context, state.editor);
 
   const parentResult = ensureParentDirs(nextFiles, path);
-  if (!parentResult.ok) return ok(`${path}: ${parentResult.message}`, state.cluster, state.files, state.cwd, state.context);
+  if (!parentResult.ok) return ok(`${path}: ${parentResult.message}`, state.cluster, state.files, state.cwd, state.context, state.editor);
 
   nextFiles[path] = {
     type: "file",
     content: append && existing?.type === "file" ? `${existing.content ?? ""}${content}` : content,
   };
-  return ok("", state.cluster, nextFiles, state.cwd, state.context);
+  return ok("", state.cluster, nextFiles, state.cwd, state.context, state.editor);
 }
 
 function appendToFile(files, path, content) {
@@ -445,6 +536,6 @@ function isKubeletUnit(unit) {
   return unit === "kubelet.service";
 }
 
-function ok(output, cluster, files, cwd, context) {
-  return { output, cluster, files, cwd, context };
+function ok(output, cluster, files, cwd, context, editor = null) {
+  return { output, cluster, files, cwd, context, editor };
 }

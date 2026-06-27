@@ -2,6 +2,21 @@ import { parseAllDocuments } from "yaml";
 import { normalizePath } from "./filesystem.js";
 import { namespace } from "./clusterState.js";
 
+const CLUSTER_SCOPED_RESOURCES = new Set(["namespaces", "nodes", "storageclasses"]);
+const API_VERSION_BY_KIND = {
+  ConfigMap: "v1",
+  Deployment: "apps/v1",
+  Ingress: "networking.k8s.io/v1",
+  Namespace: "v1",
+  NetworkPolicy: "networking.k8s.io/v1",
+  PersistentVolumeClaim: "v1",
+  Pod: "v1",
+  Role: "rbac.authorization.k8s.io/v1",
+  RoleBinding: "rbac.authorization.k8s.io/v1",
+  Secret: "v1",
+  Service: "v1",
+};
+
 export function runKubectl({ args, cluster, files, cwd, context }) {
   const nextCluster = structuredClone(cluster);
   const command = args[0];
@@ -12,7 +27,12 @@ export function runKubectl({ args, cluster, files, cwd, context }) {
   }
 
   if (args[0] === "config" && args[1] === "use-context") {
-    nextCluster.currentContext = args[2] ?? nextCluster.currentContext;
+    const nextContext = args[2];
+    if (!nextContext) return ok("error: context name is required", nextCluster, files, cwd, context);
+    if (!(nextCluster.contexts ?? []).includes(nextContext)) {
+      return ok(`error: no context exists with the name: "${nextContext}"`, nextCluster, files, cwd, context);
+    }
+    nextCluster.currentContext = nextContext;
     return ok(
       `Switched to context "${nextCluster.currentContext}".`,
       nextCluster,
@@ -42,11 +62,18 @@ export function runKubectl({ args, cluster, files, cwd, context }) {
 }
 
 function getResource(args, cluster, files, cwd, context) {
-  const resource = normalizeResource(args[1]);
+  const target = parseResourceTarget(args, 1);
+  if (target.error) return ok(target.error, cluster, files, cwd, context);
+  const resource = target.kind;
   const allNamespaces = args.includes("-A") || args.includes("--all-namespaces");
   const ns = getNamespace(args, "default");
 
   if (resource === "namespaces") {
+    if (target.name) {
+      const nsItem = cluster.namespaces[target.name];
+      if (!nsItem) return ok(`Error from server (NotFound): namespaces "${target.name}" not found`, cluster, files, cwd, context);
+      return ok(table(["NAME", "STATUS"], [[nsItem.name, "Active"]]), cluster, files, cwd, context);
+    }
     return ok(
       table(["NAME", "STATUS"], Object.keys(cluster.namespaces).map((name) => [name, "Active"])),
       cluster,
@@ -57,6 +84,11 @@ function getResource(args, cluster, files, cwd, context) {
   }
 
   if (resource === "nodes") {
+    if (target.name) {
+      const node = cluster.nodes[target.name];
+      if (!node) return ok(`Error from server (NotFound): nodes "${target.name}" not found`, cluster, files, cwd, context);
+      return ok(table(["NAME", "STATUS", "ROLES", "VERSION"], [[node.name, node.status, node.role, node.version ?? "v1.33.1"]]), cluster, files, cwd, context);
+    }
     return ok(
       table(
         ["NAME", "STATUS", "ROLES", "VERSION"],
@@ -75,6 +107,11 @@ function getResource(args, cluster, files, cwd, context) {
   }
 
   if (resource === "storageclasses") {
+    if (target.name) {
+      const storageClass = cluster.storageClasses?.[target.name];
+      if (!storageClass) return ok(`Error from server (NotFound): storageclasses.storage.k8s.io "${target.name}" not found`, cluster, files, cwd, context);
+      return ok(table(["NAME", "PROVISIONER", "DEFAULT"], [[storageClass.name, storageClass.provisioner, storageClass.default ? "true" : "false"]]), cluster, files, cwd, context);
+    }
     return ok(
       table(
         ["NAME", "PROVISIONER", "DEFAULT"],
@@ -91,23 +128,40 @@ function getResource(args, cluster, files, cwd, context) {
     );
   }
 
-  const spaces = allNamespaces ? Object.values(cluster.namespaces) : [ensureNamespace(cluster, ns)];
+  const namespaceCheck = requireNamespaceForResource(cluster, ns, resource, allNamespaces);
+  if (!namespaceCheck.ok) return ok(namespaceCheck.message, cluster, files, cwd, context);
+
+  const spaces = allNamespaces ? Object.values(cluster.namespaces) : [namespaceCheck.space];
   const rows = [];
   for (const space of spaces) {
-    for (const item of Object.values(collectionFor(space, resource))) {
+    const collection = collectionFor(space, resource);
+    if (!collection) return ok(unknownResource(args[1]), cluster, files, cwd, context);
+    if (target.name) {
+      const item = collection[target.name];
+      if (item) rows.push(allNamespaces ? [space.name, item.name, displayStatus(item)] : [item.name, displayStatus(item)]);
+      continue;
+    }
+    for (const item of Object.values(collection)) {
       rows.push(allNamespaces ? [space.name, item.name, displayStatus(item)] : [item.name, displayStatus(item)]);
     }
   }
 
+  if (target.name && rows.length === 0) return ok(notFound(resource, target.name), cluster, files, cwd, context);
   return ok(table(allNamespaces ? ["NAMESPACE", "NAME", "STATUS"] : ["NAME", "STATUS"], rows), cluster, files, cwd, context);
 }
 
 function describeResource(args, cluster, files, cwd, context) {
-  const resource = normalizeResource(args[1]);
-  const name = args[2];
+  const target = parseResourceTarget(args, 1);
+  if (target.error) return ok(target.error, cluster, files, cwd, context);
+  const resource = target.kind;
+  const name = target.name;
   const ns = getNamespace(args, "default");
-  const item = collectionFor(ensureNamespace(cluster, ns), resource)[name];
-  if (!item) return ok(`Error from server (NotFound): ${resource} "${name}" not found`, cluster, files, cwd, context);
+  const namespaceCheck = requireNamespaceForResource(cluster, ns, resource, false);
+  if (!namespaceCheck.ok) return ok(namespaceCheck.message, cluster, files, cwd, context);
+  const collection = collectionFor(namespaceCheck.space, resource);
+  if (!collection) return ok(unknownResource(args[1]), cluster, files, cwd, context);
+  const item = collection[name];
+  if (!item) return ok(notFound(resource, name), cluster, files, cwd, context);
 
   return ok(
     [
@@ -127,29 +181,45 @@ function createResource(args, cluster, files, cwd, context, ns) {
   const resource = args[1];
 
   if (resource === "namespace" || resource === "ns") {
-    const name = args[2];
+    const nameArg = readSingleNameArg(args, 2);
+    if (!nameArg.ok) return ok(nameArg.message, cluster, files, cwd, context);
+    const name = nameArg.name;
+    if (cluster.namespaces[name]) {
+      return ok(`Error from server (AlreadyExists): namespaces "${name}" already exists`, cluster, files, cwd, context);
+    }
     cluster.namespaces[name] = cluster.namespaces[name] ?? namespace(name);
     return ok(`namespace/${name} created`, cluster, files, cwd, context);
   }
 
+  const namespaceCheck = requireNamespace(cluster, ns);
+  if (!namespaceCheck.ok) return ok(namespaceCheck.message, cluster, files, cwd, context);
+
   if (resource === "deployment") {
-    const name = args[2];
-    const image = valueAfter(args, "--image") ?? "nginx:1.27";
-    const replicas = Number(valueAfter(args, "--replicas") ?? "1");
+    const nameArg = readSingleNameArg(args, 2);
+    if (!nameArg.ok) return ok(nameArg.message, cluster, files, cwd, context);
+    const name = nameArg.name;
+    if (namespaceCheck.space.deployments[name]) return ok(alreadyExists("deployment", name), cluster, files, cwd, context);
+    const image = parseImage(valueAfter(args, "--image"));
+    if (!image.ok) return ok(image.message, cluster, files, cwd, context);
+    const replicas = parseReplicas(valueAfter(args, "--replicas"));
+    if (!replicas.ok) return ok(replicas.message, cluster, files, cwd, context);
     upsertDeployment(cluster, ns, {
       name,
       namespace: ns,
-      image,
-      replicas,
+      image: image.value,
+      replicas: replicas.value,
       labels: parseLabels(valueAfter(args, "--labels")) ?? { app: name },
-      containers: [{ name: "app", image }],
+      containers: [{ name: "app", image: image.value }],
     });
     return ok(`deployment.apps/${name} created`, cluster, files, cwd, context);
   }
 
   if (resource === "configmap") {
-    const name = args[2];
-    ensureNamespace(cluster, ns).configMaps[name] = {
+    const nameArg = readSingleNameArg(args, 2);
+    if (!nameArg.ok) return ok(nameArg.message, cluster, files, cwd, context);
+    const name = nameArg.name;
+    if (namespaceCheck.space.configMaps[name]) return ok(alreadyExists("configmap", name), cluster, files, cwd, context);
+    namespaceCheck.space.configMaps[name] = {
       name,
       namespace: ns,
       data: parseFromLiteralArgs(args),
@@ -159,8 +229,11 @@ function createResource(args, cluster, files, cwd, context, ns) {
   }
 
   if (resource === "secret" && args[2] === "generic") {
-    const name = args[3];
-    ensureNamespace(cluster, ns).secrets[name] = {
+    const nameArg = readSingleNameArg(args, 3);
+    if (!nameArg.ok) return ok(nameArg.message, cluster, files, cwd, context);
+    const name = nameArg.name;
+    if (namespaceCheck.space.secrets[name]) return ok(alreadyExists("secret", name), cluster, files, cwd, context);
+    namespaceCheck.space.secrets[name] = {
       name,
       namespace: ns,
       type: "Opaque",
@@ -171,12 +244,15 @@ function createResource(args, cluster, files, cwd, context, ns) {
   }
 
   if (resource === "service" && args[2] === "clusterip") {
-    const name = args[3];
-    const tcp = valueAfter(args, "--tcp") ?? "80:80";
-    const [port, targetPort] = tcp.split(":").map(Number);
-    ensureNamespace(cluster, ns).services[name] = normalizeService({
+    const nameArg = readSingleNameArg(args, 3);
+    if (!nameArg.ok) return ok(nameArg.message, cluster, files, cwd, context);
+    const name = nameArg.name;
+    if (namespaceCheck.space.services[name]) return ok(alreadyExists("service", name), cluster, files, cwd, context);
+    const tcp = parseTcpPortSpec(valueAfter(args, "--tcp"));
+    if (!tcp.ok) return ok(tcp.message, cluster, files, cwd, context);
+    namespaceCheck.space.services[name] = normalizeService({
       metadata: { name, namespace: ns },
-      spec: { selector: { app: name }, ports: [{ port, targetPort }], type: "ClusterIP" },
+      spec: { selector: { app: name }, ports: [{ port: tcp.port, targetPort: tcp.targetPort }], type: "ClusterIP" },
     });
     return ok(`service/${name} created`, cluster, files, cwd, context);
   }
@@ -185,20 +261,26 @@ function createResource(args, cluster, files, cwd, context, ns) {
 }
 
 function runPod(args, cluster, files, cwd, context, ns) {
-  const name = args[1];
-  const image = valueAfter(args, "--image") ?? "nginx:1.27";
+  const nameArg = readSingleNameArg(args, 1);
+  if (!nameArg.ok) return ok(nameArg.message, cluster, files, cwd, context);
+  const name = nameArg.name;
+  const namespaceCheck = requireNamespace(cluster, ns);
+  if (!namespaceCheck.ok) return ok(namespaceCheck.message, cluster, files, cwd, context);
+  if (namespaceCheck.space.pods[name]) return ok(alreadyExists("pod", name), cluster, files, cwd, context);
+  const image = parseImage(valueAfter(args, "--image"));
+  if (!image.ok) return ok(image.message, cluster, files, cwd, context);
   const labels = parseLabels(valueAfter(args, "--labels")) ?? { run: name };
-  ensureNamespace(cluster, ns).pods[name] = {
+  namespaceCheck.space.pods[name] = {
     name,
     namespace: ns,
-    image,
-    status: image.includes("broken") ? "ImagePullBackOff" : "Running",
-    ready: image.includes("broken") ? "0/1" : "1/1",
+    image: image.value,
+    status: image.value.includes("broken") ? "ImagePullBackOff" : "Running",
+    ready: image.value.includes("broken") ? "0/1" : "1/1",
     restarts: 0,
     nodeName: "worker-1",
     labels,
-    spec: { containers: [{ name, image }] },
-    logs: `${name} started with image ${image}`,
+    spec: { containers: [{ name, image: image.value }] },
+    logs: `${name} started with image ${image.value}`,
   };
   return ok(`pod/${name} created`, cluster, files, cwd, context);
 }
@@ -206,6 +288,7 @@ function runPod(args, cluster, files, cwd, context, ns) {
 function applyManifest(args, cluster, files, cwd, context) {
   const fileArg = valueAfter(args, "-f") ?? valueAfter(args, "--filename");
   if (!fileArg) return ok("error: must specify -f", cluster, files, cwd, context);
+  const defaultNamespace = getNamespace(args, "default");
 
   const path = normalizePath(cwd, fileArg);
   const file = files[path];
@@ -213,40 +296,65 @@ function applyManifest(args, cluster, files, cwd, context) {
 
   let docs;
   try {
-    docs = parseAllDocuments(file.content).map((doc) => doc.toJSON()).filter(Boolean);
+    docs = parseAllDocuments(file.content, { keepSourceTokens: true });
   } catch (error) {
     return ok(`error: unable to parse YAML: ${error.message}`, cluster, files, cwd, context);
   }
 
-  const messages = docs.map((doc) => applyDocument(doc, cluster));
+  const messages = [];
+  for (const doc of docs) {
+    const object = doc.toJSON();
+    if (!object) continue;
+    const message = applyDocument(object, cluster, defaultNamespace, documentHints(doc));
+    messages.push(message);
+    if (message.startsWith("Error ") || message.startsWith("error:")) break;
+  }
   return ok(messages.join("\n"), cluster, files, cwd, context);
 }
 
-function applyDocument(object, cluster) {
+function applyDocument(object, cluster, defaultNamespace = "default", hints = {}) {
   const kind = object?.kind;
   const metadata = object?.metadata ?? {};
   const name = metadata.name;
-  const ns = metadata.namespace ?? "default";
+  const ns = metadata.namespace ?? defaultNamespace;
 
-  if (!kind || !name) return "object/unknown skipped";
-  ensureNamespace(cluster, ns);
+  if (!object?.apiVersion) return "error: apiVersion may not be empty";
+  if (!kind) return "error: kind may not be empty";
+  if (!name) return "error: resource name may not be empty";
+  const expectedApiVersion = API_VERSION_BY_KIND[kind];
+  if (!expectedApiVersion) return `error: resource mapping not found for name: "${name}" kind: "${kind}"`;
+  if (object.apiVersion !== expectedApiVersion) {
+    return `error: no matches for kind "${kind}" in version "${object.apiVersion}"`;
+  }
 
   if (kind === "Namespace") {
     cluster.namespaces[name] = cluster.namespaces[name] ?? namespace(name);
     return `namespace/${name} configured`;
   }
 
+  const namespaceCheck = requireNamespace(cluster, ns);
+  if (!namespaceCheck.ok) return namespaceCheck.message;
+
   if (kind === "Deployment") {
+    const replicas = parseManifestReplicas(object.spec?.replicas, hints.replicasSource);
+    if (!replicas.ok) return replicas.message;
+    object = {
+      ...object,
+      spec: {
+        ...(object.spec ?? {}),
+        replicas: replicas.value,
+      },
+    };
     upsertDeployment(cluster, ns, normalizeDeployment(object, ns));
     return `deployment.apps/${name} configured`;
   }
 
+  const space = namespaceCheck.space;
   if (kind === "Pod") {
-    ensureNamespace(cluster, ns).pods[name] = normalizePod(object, ns);
+    space.pods[name] = normalizePod(object, ns);
     return `pod/${name} configured`;
   }
 
-  const space = ensureNamespace(cluster, ns);
   if (kind === "Service") {
     space.services[name] = normalizeService(object);
     return `service/${name} configured`;
@@ -295,63 +403,126 @@ function applyDocument(object, cluster) {
     return `networkpolicy/${name} configured`;
   }
 
-  return `${kind.toLowerCase()}/${name} accepted`;
+  return `error: resource mapping not found for name: "${name}" kind: "${kind}"`;
 }
 
 function deleteResource(args, cluster, files, cwd, context, ns) {
   const target = splitKindName(args[1], args[2]);
-  const collection = collectionFor(ensureNamespace(cluster, ns), normalizeResource(target.kind));
+  if (target.error) return ok(target.error, cluster, files, cwd, context);
+  const namespaceCheck = requireNamespaceForResource(cluster, ns, target.kind, false);
+  if (!namespaceCheck.ok) return ok(namespaceCheck.message, cluster, files, cwd, context);
+  const collection = collectionFor(namespaceCheck.space, normalizeResource(target.kind));
+  if (!collection) return ok(unknownResource(args[1]), cluster, files, cwd, context);
   if (!collection[target.name]) {
-    return ok(`Error from server (NotFound): ${target.kind} "${target.name}" not found`, cluster, files, cwd, context);
+    return ok(notFound(target.kind, target.name), cluster, files, cwd, context);
   }
   delete collection[target.name];
+  if (normalizeResource(target.kind) === "deployment") {
+    for (const [podName, pod] of Object.entries(namespaceCheck.space.pods)) {
+      if (pod.owner === target.name) delete namespaceCheck.space.pods[podName];
+    }
+  }
   return ok(`${target.kind}/${target.name} deleted`, cluster, files, cwd, context);
 }
 
 function scaleResource(args, cluster, files, cwd, context, ns) {
   const target = splitKindName(args[1], args[2]);
-  const replicas = Number(valueAfter(args, "--replicas") ?? "1");
-  const deployment = ensureNamespace(cluster, ns).deployments[target.name];
+  if (target.error) return ok(target.error, cluster, files, cwd, context);
+  if (normalizeResource(target.kind) !== "deployment" && normalizeResource(target.kind) !== "deployments") {
+    return ok(`error: cannot scale resource "${args[1]}"`, cluster, files, cwd, context);
+  }
+  if (valueAfter(args, "--replicas") === undefined) {
+    return ok("error: required flag(s) \"replicas\" not set", cluster, files, cwd, context);
+  }
+  const replicas = parseReplicas(valueAfter(args, "--replicas"));
+  if (!replicas.ok) return ok(replicas.message, cluster, files, cwd, context);
+  const namespaceCheck = requireNamespace(cluster, ns);
+  if (!namespaceCheck.ok) return ok(namespaceCheck.message, cluster, files, cwd, context);
+  const deployment = namespaceCheck.space.deployments[target.name];
   if (!deployment) return ok(`Error from server (NotFound): deployment "${target.name}" not found`, cluster, files, cwd, context);
-  deployment.replicas = replicas;
-  deployment.availableReplicas = replicas;
-  reconcileDeployment(ensureNamespace(cluster, ns), deployment);
+  deployment.replicas = replicas.value;
+  deployment.availableReplicas = replicas.value;
+  reconcileDeployment(namespaceCheck.space, deployment);
   return ok(`deployment.apps/${target.name} scaled`, cluster, files, cwd, context);
 }
 
 function setImage(args, cluster, files, cwd, context, ns) {
   const target = splitKindName(args[2], undefined);
+  if (target.error) return ok(target.error, cluster, files, cwd, context);
+  if (normalizeResource(target.kind) !== "deployment" && normalizeResource(target.kind) !== "deployments") {
+    return ok(`error: cannot set image on resource "${args[2]}"`, cluster, files, cwd, context);
+  }
   const assignment = args.find((arg, index) => index > 2 && arg.includes("="));
-  const image = assignment?.split("=").slice(1).join("=");
-  const deployment = ensureNamespace(cluster, ns).deployments[target.name];
+  if (!assignment) return ok("error: image update requires CONTAINER=IMAGE", cluster, files, cwd, context);
+  const containerName = assignment.split("=")[0];
+  const image = parseImage(assignment?.split("=").slice(1).join("="), undefined);
+  if (!image.ok) return ok(image.message, cluster, files, cwd, context);
+  const namespaceCheck = requireNamespace(cluster, ns);
+  if (!namespaceCheck.ok) return ok(namespaceCheck.message, cluster, files, cwd, context);
+  const deployment = namespaceCheck.space.deployments[target.name];
   if (!deployment) return ok(`Error from server (NotFound): deployment "${target.name}" not found`, cluster, files, cwd, context);
+  if (!deployment.containers?.some((container) => container.name === containerName)) {
+    return ok(`error: unable to find container named "${containerName}"`, cluster, files, cwd, context);
+  }
 
-  deployment.image = image;
-  deployment.containers = [{ name: assignment?.split("=")[0] ?? "app", image }];
-  deployment.status = image?.includes("broken") ? "Progressing" : "Available";
-  reconcileDeployment(ensureNamespace(cluster, ns), deployment);
+  deployment.image = image.value;
+  deployment.containers = deployment.containers.map((container) =>
+    container.name === containerName ? { ...container, image: image.value } : container,
+  );
+  deployment.status = image.value.includes("broken") ? "Progressing" : "Available";
+  reconcileDeployment(namespaceCheck.space, deployment);
   return ok(`deployment.apps/${target.name} image updated`, cluster, files, cwd, context);
 }
 
 function rolloutStatus(args, cluster, files, cwd, context, ns) {
+  if (args[1] !== "status") return ok("error: only rollout status is simulated", cluster, files, cwd, context);
   const target = splitKindName(args.find((arg) => arg.includes("/")) ?? args[2], undefined);
-  const deployment = ensureNamespace(cluster, ns).deployments[target.name];
+  if (target.error) return ok(target.error, cluster, files, cwd, context);
+  if (normalizeResource(target.kind) !== "deployment" && normalizeResource(target.kind) !== "deployments") {
+    return ok(`error: rollout status is only simulated for deployments`, cluster, files, cwd, context);
+  }
+  const namespaceCheck = requireNamespace(cluster, ns);
+  if (!namespaceCheck.ok) return ok(namespaceCheck.message, cluster, files, cwd, context);
+  const deployment = namespaceCheck.space.deployments[target.name];
   if (!deployment) return ok(`Error from server (NotFound): deployment "${target.name}" not found`, cluster, files, cwd, context);
+  if (deployment.status !== "Available" || deployment.availableReplicas !== deployment.replicas) {
+    return ok(
+      `waiting for deployment "${target.name}" rollout to finish: ${deployment.availableReplicas ?? 0} of ${deployment.replicas} updated replicas are available`,
+      cluster,
+      files,
+      cwd,
+      context,
+    );
+  }
   return ok(`deployment "${target.name}" successfully rolled out`, cluster, files, cwd, context);
 }
 
 function logsFor(args, cluster, files, cwd, context, ns) {
-  const target = splitKindName(args[1], undefined);
-  const space = ensureNamespace(cluster, ns);
-  const pod =
-    space.pods[target.name] ??
-    Object.values(space.pods).find((item) => item.owner === target.name) ??
-    Object.values(space.pods)[0];
-  return ok(pod?.logs ?? "simulated application log: request completed with status=200", cluster, files, cwd, context);
+  const target = parseLogsTarget(args[1]);
+  if (target.error) return ok(target.error, cluster, files, cwd, context);
+  const namespaceCheck = requireNamespace(cluster, ns);
+  if (!namespaceCheck.ok) return ok(namespaceCheck.message, cluster, files, cwd, context);
+  const space = namespaceCheck.space;
+  if (target.kind === "deployment" || target.kind === "deployments") {
+    const deployment = space.deployments[target.name];
+    if (!deployment) return ok(alreadyMissingDeployment(target.name), cluster, files, cwd, context);
+    const pod = Object.values(space.pods).find((item) => item.owner === target.name);
+    if (!pod) return ok(`Error from server (NotFound): pods for deployment "${target.name}" not found`, cluster, files, cwd, context);
+    return ok(pod.logs ?? "simulated application log: request completed with status=200", cluster, files, cwd, context);
+  }
+  const pod = space.pods[target.name];
+  if (!pod) return ok(notFound("pod", target.name), cluster, files, cwd, context);
+  return ok(pod.logs ?? "simulated application log: request completed with status=200", cluster, files, cwd, context);
 }
 
 function topResource(args, cluster, files, cwd, context) {
   if (args[1] !== "nodes") return ok("Only kubectl top nodes is simulated", cluster, files, cwd, context);
+  const nodeName = args[2]?.startsWith("-") ? undefined : args[2];
+  if (nodeName) {
+    const node = cluster.nodes[nodeName];
+    if (!node) return ok(`Error from server (NotFound): nodes "${nodeName}" not found`, cluster, files, cwd, context);
+    return ok(table(["NAME", "CPU(cores)", "MEMORY(bytes)"], [[node.name, node.cpu, node.memory]]), cluster, files, cwd, context);
+  }
   return ok(
     table(
       ["NAME", "CPU(cores)", "MEMORY(bytes)"],
@@ -577,6 +748,23 @@ function ensureNamespace(cluster, name) {
   return cluster.namespaces[name];
 }
 
+function requireNamespace(cluster, name) {
+  const space = cluster.namespaces[name];
+  if (!space) return { ok: false, message: namespaceNotFound(name) };
+  return { ok: true, space };
+}
+
+function requireNamespaceForResource(cluster, name, resource, allNamespaces) {
+  if (allNamespaces || CLUSTER_SCOPED_RESOURCES.has(normalizeResource(resource))) {
+    return { ok: true, space: null };
+  }
+  return requireNamespace(cluster, name);
+}
+
+function namespaceNotFound(name) {
+  return `Error from server (NotFound): namespaces "${name}" not found`;
+}
+
 function collectionFor(space, resource) {
   return {
     pods: space.pods,
@@ -601,7 +789,22 @@ function collectionFor(space, resource) {
     rolebinding: space.roleBindings,
     networkpolicies: space.networkPolicies,
     networkpolicy: space.networkPolicies,
-  }[resource] ?? {};
+  }[normalizeResource(resource)];
+}
+
+function parseResourceTarget(args, index) {
+  const raw = args[index] ?? "";
+  if (raw.includes("/")) return splitKindName(raw, undefined);
+  const possibleName = args[index + 1];
+  return {
+    kind: normalizeResource(raw),
+    name: possibleName && !possibleName.startsWith("-") ? possibleName : undefined,
+  };
+}
+
+function parseLogsTarget(raw = "") {
+  if (raw.includes("/")) return splitKindName(raw, undefined);
+  return { kind: "pod", name: raw };
 }
 
 function normalizeResource(input = "") {
@@ -644,16 +847,160 @@ function getNamespace(args, fallback) {
 function valueAfter(args, flag) {
   const direct = args.find((arg) => arg.startsWith(`${flag}=`));
   if (direct) return direct.split("=").slice(1).join("=");
+  if (/^-[A-Za-z]$/.test(flag)) {
+    const compact = args.find((arg) => arg.startsWith(flag) && arg.length > flag.length);
+    if (compact) return compact.slice(flag.length);
+  }
   const index = args.indexOf(flag);
   return index >= 0 ? args[index + 1] : undefined;
 }
 
+function readSingleNameArg(args, index) {
+  const names = positionalArgs(args, index);
+  if (names.length === 0) return { ok: false, message: "error: name is required" };
+  if (names.length > 1) return { ok: false, message: `error: exactly one NAME is required, got ${names.length}` };
+  return { ok: true, name: names[0] };
+}
+
+function positionalArgs(args, startIndex) {
+  const flagsWithValues = new Set([
+    "-f",
+    "-n",
+    "--filename",
+    "--from-literal",
+    "--image",
+    "--labels",
+    "--namespace",
+    "--replicas",
+    "--tcp",
+  ]);
+  const values = [];
+  for (let index = startIndex; index < args.length; index += 1) {
+    const arg = args[index];
+    if (!arg) continue;
+    if (arg.startsWith("--") && arg.includes("=")) continue;
+    if (arg.startsWith("-")) {
+      if (flagsWithValues.has(arg)) index += 1;
+      continue;
+    }
+    values.push(arg);
+  }
+  return values;
+}
+
+function parseReplicas(value, fallback = 1) {
+  if (value === undefined || value === null) return { ok: true, value: fallback };
+  const text = String(value).trim();
+  if (text === "" || !/^(0|[1-9]\d*)$/.test(text)) {
+    return { ok: false, message: `error: invalid replicas value "${value}"` };
+  }
+  const replicas = Number(text);
+  if (!Number.isInteger(replicas) || replicas < 0) {
+    return { ok: false, message: `error: invalid replicas value "${value}"` };
+  }
+  return { ok: true, value: replicas };
+}
+
+function parseManifestReplicas(value, source) {
+  if (value === undefined || value === null) return parseReplicas(value);
+  if (source !== undefined && !/^(0|[1-9]\d*)$/.test(String(source).trim())) {
+    return { ok: false, message: `error: invalid replicas value "${source}"` };
+  }
+  return parseReplicas(source ?? value);
+}
+
+function parseImage(value, fallback = "nginx:1.27") {
+  if (value === undefined || value === null) {
+    if (fallback === undefined) return { ok: false, message: "error: image must not be empty" };
+    return { ok: true, value: fallback };
+  }
+  if (String(value).trim() === "" || String(value).startsWith("-")) {
+    return { ok: false, message: "error: image must not be empty" };
+  }
+  return { ok: true, value: String(value) };
+}
+
+function parseTcpPortSpec(value, fallback = "80:80") {
+  const raw = value === undefined || value === null ? fallback : String(value);
+  const [portValue, targetPortValue, extra] = raw.split(":");
+  const port = parsePort(portValue);
+  const targetPort = parsePort(targetPortValue ?? portValue);
+  if (extra !== undefined || !port.ok || !targetPort.ok) {
+    return { ok: false, message: `error: invalid tcp value "${raw}"` };
+  }
+  return { ok: true, port: port.value, targetPort: targetPort.value };
+}
+
+function parsePort(value) {
+  if (value === undefined || value === null || !/^(0|[1-9]\d*)$/.test(String(value).trim())) return { ok: false };
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return { ok: false };
+  return { ok: true, value: port };
+}
+
 function splitKindName(kindOrTarget = "", name) {
   if (kindOrTarget.includes("/")) {
-    const [kind, targetName] = kindOrTarget.split("/");
+    const parts = kindOrTarget.split("/");
+    if (parts.length > 2) return { error: invalidResourceTarget(), kind: normalizeResource(parts[0]), name: parts[1] };
+    const [kind, targetName] = parts;
     return { kind: normalizeResource(kind), name: targetName };
   }
   return { kind: normalizeResource(kindOrTarget), name };
+}
+
+function documentHints(doc) {
+  return {
+    replicasSource: doc.getIn(["spec", "replicas"], true)?.srcToken?.source,
+  };
+}
+
+function invalidResourceTarget() {
+  return "error: arguments in resource/name form may not have more than one slash";
+}
+
+function unknownResource(input) {
+  const resource = String(input ?? "").split("/")[0];
+  return `error: the server doesn't have a resource type "${resource}"`;
+}
+
+function notFound(resource, name) {
+  return `Error from server (NotFound): ${resourceNameForError(resource)} "${name}" not found`;
+}
+
+function alreadyExists(resource, name) {
+  return `Error from server (AlreadyExists): ${resourceNameForError(resource)} "${name}" already exists`;
+}
+
+function alreadyMissingDeployment(name) {
+  return `Error from server (NotFound): deployments.apps "${name}" not found`;
+}
+
+function resourceNameForError(resource) {
+  const value = normalizeResource(resource);
+  return {
+    pod: "pods",
+    pods: "pods",
+    deployment: "deployments.apps",
+    deployments: "deployments.apps",
+    service: "services",
+    services: "services",
+    configmap: "configmaps",
+    configmaps: "configmaps",
+    secret: "secrets",
+    secrets: "secrets",
+    ingress: "ingresses.networking.k8s.io",
+    ingresses: "ingresses.networking.k8s.io",
+    role: "roles.rbac.authorization.k8s.io",
+    roles: "roles.rbac.authorization.k8s.io",
+    rolebinding: "rolebindings.rbac.authorization.k8s.io",
+    rolebindings: "rolebindings.rbac.authorization.k8s.io",
+    networkpolicy: "networkpolicies.networking.k8s.io",
+    networkpolicies: "networkpolicies.networking.k8s.io",
+    pvc: "persistentvolumeclaims",
+    pvcs: "persistentvolumeclaims",
+    persistentvolumeclaim: "persistentvolumeclaims",
+    persistentvolumeclaims: "persistentvolumeclaims",
+  }[value] ?? value;
 }
 
 function parseFromLiteralArgs(args) {

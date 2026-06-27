@@ -617,6 +617,11 @@ textarea:focus-visible {
   background: linear-gradient(180deg, rgba(3, 5, 4, 0.86), var(--terminal) 34%);
 }
 
+.command-line.editor-mode {
+  border-top-color: rgba(241, 191, 90, 0.44);
+  background: linear-gradient(180deg, rgba(18, 14, 4, 0.88), var(--terminal) 38%);
+}
+
 .command-line textarea {
   width: 100%;
   min-width: 0;
@@ -630,6 +635,12 @@ textarea:focus-visible {
   font-family: inherit;
   font-size: inherit;
   line-height: 1.5;
+}
+
+.command-line.insert-mode textarea {
+  min-height: 108px;
+  color: #fff4d5;
+  caret-color: var(--amber);
 }
 
 .command-line textarea::placeholder {

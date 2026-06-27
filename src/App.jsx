@@ -114,24 +114,32 @@ export default function App() {
   const completed = gradedQuestions.filter((item) => item.grade.passed).length;
   const completionPercent = questions.length ? Math.round((completed / questions.length) * 100) : 0;
   const commandCount = history.filter((entry) => entry.command && !entry.command.startsWith("#")).length;
-  const inputRows = Math.min(Math.max(input.split("\n").length, 1), 8);
+  const isEditorActive = Boolean(snapshot.editor);
+  const isEditorInsert = snapshot.editor?.mode === "insert";
+  const inputRows = isEditorInsert
+    ? Math.min(Math.max(input.split("\n").length, 5), 14)
+    : Math.min(Math.max(input.split("\n").length, 1), 8);
 
   useEffect(() => {
     const output = terminalOutputRef.current;
     if (output) output.scrollTop = output.scrollHeight;
   }, [history]);
 
-  function submitCommand(event) {
-    event.preventDefault();
-    const commands = splitSubmittedCommands(input);
+  function runCommands(commands, labels = commands) {
     if (!commands.length) return;
 
     const entries = [];
     let nextSnapshot = snapshot;
 
-    for (const command of commands) {
+    for (const [index, command] of commands.entries()) {
+      const wasEditorActive = Boolean(nextSnapshot.editor);
       const result = session.runCommand(command);
-      entries.push({ command, output: result.output, prompt: nextSnapshot.prompt });
+      entries.push({
+        command: labels[index] ?? command,
+        output: result.output,
+        prompt: nextSnapshot.prompt,
+        clear: !wasEditorActive && command === "clear",
+      });
       nextSnapshot = session.getSnapshot();
     }
 
@@ -139,7 +147,7 @@ export default function App() {
     setHistory((items) => {
       let nextItems = [...items];
       for (const entry of entries) {
-        nextItems = entry.command === "clear" ? [] : [...nextItems, entry];
+        nextItems = entry.clear ? [] : [...nextItems, entry];
       }
       return nextItems;
     });
@@ -154,8 +162,28 @@ export default function App() {
     }
   }
 
+  function submitCommand(event) {
+    event.preventDefault();
+    const commands = isEditorActive ? [input] : splitSubmittedCommands(input);
+    if (!commands.length || (isEditorInsert && input.length === 0)) return;
+    runCommands(commands);
+  }
+
   function handleCommandKeyDown(event) {
-    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+    if (event.nativeEvent.isComposing) return;
+    if (isEditorInsert && event.key === "Escape") {
+      event.preventDefault();
+      runCommands(["\u001b"], ["Esc"]);
+      return;
+    }
+    if (isEditorInsert) {
+      if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        event.currentTarget.form?.requestSubmit();
+      }
+      return;
+    }
+    if (event.key !== "Enter" || event.shiftKey) return;
     event.preventDefault();
     event.currentTarget.form?.requestSubmit();
   }
@@ -368,7 +396,10 @@ export default function App() {
                   {entry.output ? <pre>{entry.output}</pre> : null}
                 </div>
               ))}
-              <form className="command-line" onSubmit={submitCommand}>
+              <form
+                className={`command-line ${isEditorActive ? "editor-mode" : ""} ${isEditorInsert ? "insert-mode" : ""}`}
+                onSubmit={submitCommand}
+              >
                 <span>{snapshot.prompt}</span>
                 <textarea
                   value={input}
@@ -378,7 +409,7 @@ export default function App() {
                   autoFocus={shouldAutoFocusTerminal}
                   spellCheck={false}
                   aria-label="터미널 명령 입력"
-                  placeholder="kubectl get pods -A"
+                  placeholder={isEditorInsert ? "" : "kubectl get pods -A"}
                 />
                 <button type="submit" aria-label="명령 실행" title="Run command">
                   <Play size={15} />

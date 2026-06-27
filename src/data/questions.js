@@ -540,21 +540,24 @@ kind: Role
 metadata:
   name: pod-reader
   namespace: security
-spec:
-  rules:
-    resources: pods
-    verbs: get,list,watch
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: read-pods
   namespace: security
-spec:
-  roleRef:
-    kind: Role
-    name: pod-reader
-    apiGroup: rbac.authorization.k8s.io
+subjects:
+- kind: ServiceAccount
+  name: default
+  namespace: security
+roleRef:
+  kind: Role
+  name: pod-reader
+  apiGroup: rbac.authorization.k8s.io
 `,
     },
     checks: [
