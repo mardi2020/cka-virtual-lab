@@ -655,15 +655,20 @@ textarea:focus-visible {
   width: 100%;
   min-width: 0;
   max-height: 180px;
-  resize: vertical;
+  resize: none;
   color: #f3fbf7;
   caret-color: var(--green);
   border: 0;
   outline: 0;
+  appearance: none;
   background: transparent;
   font-family: inherit;
   font-size: inherit;
   line-height: 1.5;
+}
+
+.command-line textarea::-webkit-resizer {
+  display: none;
 }
 
 .command-line.insert-mode textarea {
