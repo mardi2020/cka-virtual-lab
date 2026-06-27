@@ -14,6 +14,7 @@ import {
 import { questions, examDomains } from "./data/questions.js";
 import { createLabSession } from "./simulator/createLabSession.js";
 import { createInitialCluster } from "./simulator/clusterState.js";
+import { getCdCompletions } from "./simulator/completion.js";
 import { gradeQuestion } from "./scoring/grader.js";
 
 const WELCOME_OUTPUT =
@@ -89,6 +90,7 @@ export default function App() {
   const [snapshot, setSnapshot] = useState(() => session.getSnapshot());
   const [showHints, setShowHints] = useState(false);
   const [attemptedIds, setAttemptedIds] = useState(() => new Set());
+  const [completionIndex, setCompletionIndex] = useState(0);
   const [shouldAutoFocusTerminal] = useState(
     () => typeof window === "undefined" || window.matchMedia("(min-width: 881px)").matches,
   );
@@ -116,6 +118,10 @@ export default function App() {
   const commandCount = history.filter((entry) => entry.command && !entry.command.startsWith("#")).length;
   const isEditorActive = Boolean(snapshot.editor);
   const isEditorInsert = snapshot.editor?.mode === "insert";
+  const completions = useMemo(
+    () => (isEditorActive ? [] : getCdCompletions(input, { files: snapshot.files, cwd: snapshot.cwd })),
+    [input, isEditorActive, snapshot.cwd, snapshot.files],
+  );
   const inputRows = isEditorInsert
     ? Math.min(Math.max(input.split("\n").length, 5), 14)
     : Math.min(Math.max(input.split("\n").length, 1), 8);
@@ -124,6 +130,15 @@ export default function App() {
     const output = terminalOutputRef.current;
     if (output) output.scrollTop = output.scrollHeight;
   }, [history]);
+
+  useEffect(() => {
+    setCompletionIndex(0);
+  }, [input, completions.length]);
+
+  function applyCompletion(completion = completions[completionIndex]) {
+    if (!completion) return;
+    setInput(completion.replacement);
+  }
 
   function runCommands(commands, labels = commands) {
     if (!commands.length) return;
@@ -171,6 +186,21 @@ export default function App() {
 
   function handleCommandKeyDown(event) {
     if (event.nativeEvent.isComposing) return;
+    if (!isEditorActive && completions.length && event.key === "Tab") {
+      event.preventDefault();
+      applyCompletion();
+      return;
+    }
+    if (!isEditorActive && completions.length && event.key === "ArrowDown") {
+      event.preventDefault();
+      setCompletionIndex((index) => (index + 1) % completions.length);
+      return;
+    }
+    if (!isEditorActive && completions.length && event.key === "ArrowUp") {
+      event.preventDefault();
+      setCompletionIndex((index) => (index - 1 + completions.length) % completions.length);
+      return;
+    }
     if (isEditorInsert && event.key === "Escape") {
       event.preventDefault();
       runCommands(["\u001b"], ["Esc"]);
@@ -396,6 +426,23 @@ export default function App() {
                   {entry.output ? <pre>{entry.output}</pre> : null}
                 </div>
               ))}
+              {completions.length ? (
+                <div className="completion-menu" role="listbox" aria-label="cd 자동완성 후보">
+                  {completions.map((completion, index) => (
+                    <button
+                      key={completion.replacement}
+                      type="button"
+                      className={index === completionIndex ? "active" : ""}
+                      onMouseDown={(event) => {
+                        event.preventDefault();
+                        applyCompletion(completion);
+                      }}
+                    >
+                      {completion.label}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
               <form
                 className={`command-line ${isEditorActive ? "editor-mode" : ""} ${isEditorInsert ? "insert-mode" : ""}`}
                 onSubmit={submitCommand}

@@ -608,6 +608,35 @@ textarea:focus-visible {
   white-space: pre-wrap;
 }
 
+.completion-menu {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 -4px 8px;
+  padding: 8px;
+  border: 1px solid rgba(85, 199, 232, 0.32);
+  border-radius: 8px;
+  background: rgba(10, 18, 18, 0.94);
+}
+
+.completion-menu button {
+  min-height: 28px;
+  padding: 0 9px;
+  color: #d8f5ec;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: #111a18;
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.completion-menu button.active,
+.completion-menu button:hover {
+  color: #04100c;
+  border-color: rgba(55, 217, 155, 0.85);
+  background: var(--green);
+}
+
 .command-line {
   position: sticky;
   bottom: -16px;
