@@ -156,6 +156,13 @@ function describeResource(args, cluster, files, cwd, context) {
   const resource = target.kind;
   const name = target.name;
   const ns = getNamespace(args, "default");
+  if (CLUSTER_SCOPED_RESOURCES.has(normalizeResource(resource))) {
+    const collection = clusterCollectionFor(cluster, resource);
+    if (!collection) return ok(unknownResource(args[1]), cluster, files, cwd, context);
+    const item = collection[name];
+    if (!item) return ok(notFound(resource, name), cluster, files, cwd, context);
+    return ok(describeClusterScoped(resource, item), cluster, files, cwd, context);
+  }
   const namespaceCheck = requireNamespaceForResource(cluster, ns, resource, false);
   if (!namespaceCheck.ok) return ok(namespaceCheck.message, cluster, files, cwd, context);
   const collection = collectionFor(namespaceCheck.space, resource);
@@ -409,6 +416,13 @@ function applyDocument(object, cluster, defaultNamespace = "default", hints = {}
 function deleteResource(args, cluster, files, cwd, context, ns) {
   const target = splitKindName(args[1], args[2]);
   if (target.error) return ok(target.error, cluster, files, cwd, context);
+  if (CLUSTER_SCOPED_RESOURCES.has(normalizeResource(target.kind))) {
+    const collection = clusterCollectionFor(cluster, target.kind);
+    if (!collection) return ok(unknownResource(args[1]), cluster, files, cwd, context);
+    if (!collection[target.name]) return ok(notFound(target.kind, target.name), cluster, files, cwd, context);
+    delete collection[target.name];
+    return ok(`${deleteNameFor(target.kind)}/${target.name} deleted`, cluster, files, cwd, context);
+  }
   const namespaceCheck = requireNamespaceForResource(cluster, ns, target.kind, false);
   if (!namespaceCheck.ok) return ok(namespaceCheck.message, cluster, files, cwd, context);
   const collection = collectionFor(namespaceCheck.space, normalizeResource(target.kind));
@@ -765,7 +779,37 @@ function namespaceNotFound(name) {
   return `Error from server (NotFound): namespaces "${name}" not found`;
 }
 
+function clusterCollectionFor(cluster, resource) {
+  return {
+    namespaces: cluster.namespaces,
+    nodes: cluster.nodes,
+    storageclasses: cluster.storageClasses,
+  }[normalizeResource(resource)];
+}
+
+function describeClusterScoped(resource, item) {
+  return [
+    `Name: ${item.name}`,
+    `Status: ${clusterScopedStatus(resource, item)}`,
+    `Spec: ${JSON.stringify(item.spec ?? {}, null, 2)}`,
+  ].join("\n");
+}
+
+function clusterScopedStatus(resource, item) {
+  if (normalizeResource(resource) === "namespaces") return "Active";
+  return item.status ?? "Active";
+}
+
+function deleteNameFor(resource) {
+  return {
+    namespaces: "namespace",
+    nodes: "node",
+    storageclasses: "storageclass",
+  }[normalizeResource(resource)] ?? normalizeResource(resource);
+}
+
 function collectionFor(space, resource) {
+  if (!space) return undefined;
   return {
     pods: space.pods,
     pod: space.pods,

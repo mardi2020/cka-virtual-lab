@@ -554,6 +554,19 @@ EOF`);
     expect(session.getSnapshot().cluster.namespaces.workloads.deployments["decimal-replicas"]).toBeUndefined();
   });
 
+  it("handles cluster-scoped describe and delete targets without crashing", () => {
+    const session = createLabSession({ questions, initialCluster: createInitialCluster() });
+
+    expect(session.runCommand("kubectl describe namespace workloads").output).toContain("Name: workloads");
+    expect(session.runCommand("kubectl describe node worker-1").output).toContain("Name: worker-1");
+    expect(session.runCommand("kubectl delete namespace ghost").output).toBe(
+      'Error from server (NotFound): namespaces "ghost" not found',
+    );
+    expect(session.runCommand("kubectl create namespace temp").output).toBe("namespace/temp created");
+    expect(session.runCommand("kubectl delete namespace temp").output).toBe("namespace/temp deleted");
+    expect(session.getSnapshot().cluster.namespaces.temp).toBeUndefined();
+  });
+
   it("edits and saves files through the simulated vim workflow", () => {
     const session = createLabSession({ questions, initialCluster: createInitialCluster() });
     const content = [

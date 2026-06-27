@@ -17,19 +17,8 @@ import { createInitialCluster } from "./simulator/clusterState.js";
 import { getCdCompletions } from "./simulator/completion.js";
 import { gradeQuestion } from "./scoring/grader.js";
 
-const WELCOME_OUTPUT =
-  "CKA Virtual Lab에 오신 것을 환영합니다. 실제 서버 없이 kubectl과 리눅스 쉘을 시뮬레이션합니다.\nhelp를 입력하면 지원 명령을 볼 수 있습니다.";
-
 function createSession() {
   return createLabSession({ questions, initialCluster: createInitialCluster(questions) });
-}
-
-function createWelcomeEntry(extraLine = "") {
-  return {
-    command: "",
-    output: extraLine ? `${WELCOME_OUTPUT}\n\n${extraLine}` : WELCOME_OUTPUT,
-    prompt: "",
-  };
 }
 
 function splitSubmittedCommands(rawInput) {
@@ -85,7 +74,7 @@ function scoreForDomain(domainName, gradedQuestions) {
 export default function App() {
   const [session, setSession] = useState(() => createSession());
   const [activeId, setActiveId] = useState(questions[0]?.id ?? null);
-  const [history, setHistory] = useState(() => [createWelcomeEntry()]);
+  const [history, setHistory] = useState(() => []);
   const [input, setInput] = useState("");
   const [snapshot, setSnapshot] = useState(() => session.getSnapshot());
   const [showHints, setShowHints] = useState(false);
@@ -243,7 +232,7 @@ export default function App() {
     const nextSession = createSession();
     setSession(nextSession);
     setSnapshot(nextSession.getSnapshot());
-    setHistory([createWelcomeEntry("Lab 상태를 새로 시작했습니다.")]);
+    setHistory([]);
     setInput("");
     setShowHints(false);
     setAttemptedIds(new Set());
@@ -282,7 +271,7 @@ export default function App() {
           </span>
           <button className="top-action" type="button" onClick={resetLab}>
             <RotateCcw size={16} />
-            Reset lab
+            Reset test
           </button>
         </div>
       </header>
