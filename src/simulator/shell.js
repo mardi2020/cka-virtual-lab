@@ -110,6 +110,8 @@ function runEditorCommand(commandText, state) {
     const editor = { ...state.editor, buffer: "", dirty: true };
     return ok(renderEditor(editor, "deleted all lines"), state.cluster, state.files, state.cwd, state.context, editor);
   }
+  const substitution = parseSubstitutionCommand(command);
+  if (substitution) return runEditorSubstitution(substitution, state);
   if (command === ":w") return saveEditor(state, false);
   if (command === ":wq" || command === ":x" || command === "ZZ") return saveEditor(state, true);
   if (command === ":q!") {
@@ -130,6 +132,33 @@ function runEditorCommand(commandText, state) {
   }
 
   return ok(`vim: ${command}: command not simulated`, state.cluster, state.files, state.cwd, state.context, state.editor);
+}
+
+function runEditorSubstitution(substitution, state) {
+  if (!substitution.search) {
+    return ok("E476: Invalid command", state.cluster, state.files, state.cwd, state.context, state.editor);
+  }
+
+  const result = replaceLiteral(
+    state.editor.buffer,
+    substitution.search,
+    substitution.replacement,
+    substitution.global,
+  );
+  if (result.count === 0) {
+    return ok(
+      `E486: Pattern not found: ${substitution.search}`,
+      state.cluster,
+      state.files,
+      state.cwd,
+      state.context,
+      state.editor,
+    );
+  }
+
+  const editor = { ...state.editor, buffer: result.value, dirty: true };
+  const suffix = result.count === 1 ? "substitution" : "substitutions";
+  return ok(renderEditor(editor, `${result.count} ${suffix}`), state.cluster, state.files, state.cwd, state.context, editor);
 }
 
 function runEditorInsert(commandText, state) {
@@ -160,6 +189,68 @@ function saveEditor(state, closeAfterWrite) {
 
 function isEscapeCommand(commandText) {
   return commandText === "\u001b" || ["esc", "escape", "<esc>"].includes(commandText.trim().toLowerCase());
+}
+
+function parseSubstitutionCommand(command) {
+  const prefix = command.startsWith(":%s") ? ":%s" : command.startsWith(":s") ? ":s" : null;
+  if (!prefix) return null;
+
+  const delimiter = command[prefix.length];
+  if (!delimiter || /\s/.test(delimiter)) return null;
+
+  const parts = [];
+  let current = "";
+  let escaped = false;
+  for (let index = prefix.length + 1; index < command.length; index += 1) {
+    const char = command[index];
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === delimiter) {
+      parts.push(current);
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  parts.push(current);
+
+  if (parts.length < 3) return null;
+  return {
+    search: parts[0],
+    replacement: parts[1],
+    global: parts.slice(2).join(delimiter).includes("g"),
+  };
+}
+
+function replaceLiteral(value, search, replacement, replaceAll) {
+  if (replaceAll) {
+    let count = 0;
+    let next = "";
+    let cursor = 0;
+    let index = value.indexOf(search, cursor);
+    while (index >= 0) {
+      count += 1;
+      next += `${value.slice(cursor, index)}${replacement}`;
+      cursor = index + search.length;
+      index = value.indexOf(search, cursor);
+    }
+    next += value.slice(cursor);
+    return { value: next, count };
+  }
+
+  const index = value.indexOf(search);
+  if (index < 0) return { value, count: 0 };
+  return {
+    value: `${value.slice(0, index)}${replacement}${value.slice(index + search.length)}`,
+    count: 1,
+  };
 }
 
 function renderEditor(editor, status) {

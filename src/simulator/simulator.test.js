@@ -608,6 +608,27 @@ EOF`);
     expect(session.runCommand("cat /home/candidate/vim-discard.txt").output).toBe("original\n");
   });
 
+  it("replaces existing strings through vim substitution commands", () => {
+    const session = createLabSession({ questions, initialCluster: createInitialCluster() });
+
+    expect(session.runCommand("vim /home/candidate/manifests/billing-broken").output).toContain("\"billing-broken\"");
+    expect(session.runCommand(":%s#registry.local/billing:broken#nginx:1.27#g").output).toContain(
+      "1 substitution",
+    );
+    expect(session.runCommand(":wq").output).toContain("\"billing-broken\" written");
+
+    const file = session.runCommand("cat /home/candidate/manifests/billing-broken").output;
+    expect(file).toContain("image: nginx:1.27");
+    expect(file).not.toContain("registry.local/billing:broken");
+
+    expect(session.runCommand("kubectl apply -f /home/candidate/manifests/billing-broken").output).toBe(
+      "deployment.apps/billing-api configured",
+    );
+    expect(session.getSnapshot().cluster.namespaces.troubleshooting.deployments["billing-api"].image).toBe(
+      "nginx:1.27",
+    );
+  });
+
   it("starts with the practice questions unsolved", () => {
     const session = createLabSession({ questions, initialCluster: createInitialCluster() });
     const solved = questions.filter((question) => gradeQuestion(question, session.getSnapshot()).passed);
