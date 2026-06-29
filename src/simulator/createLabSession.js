@@ -49,10 +49,23 @@ export function createLabSession({ questions, initialCluster }) {
     editor = null;
   }
 
+  function updateEditorBuffer(nextBuffer) {
+    if (!editor) return getSnapshot();
+
+    const buffer = String(nextBuffer ?? "");
+    editor = {
+      ...editor,
+      buffer,
+      dirty: editor.dirty || buffer !== editor.buffer,
+    };
+    return getSnapshot();
+  }
+
   return {
     getSnapshot,
     runCommand,
     resetQuestion,
+    updateEditorBuffer,
     activeQuestionId: questions[0]?.id ?? null,
   };
 }

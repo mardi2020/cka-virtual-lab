@@ -15,6 +15,7 @@ import { questions, examDomains } from "./data/questions.js";
 import { createLabSession } from "./simulator/createLabSession.js";
 import { createInitialCluster } from "./simulator/clusterState.js";
 import { getCdCompletions } from "./simulator/completion.js";
+import { basename } from "./simulator/filesystem.js";
 import { gradeQuestion } from "./scoring/grader.js";
 
 function createSession() {
@@ -72,9 +73,12 @@ function scoreForDomain(domainName, gradedQuestions) {
 }
 
 export function commandInputPlaceholder(snapshot) {
-  if (snapshot.editor?.mode === "insert") return "";
-  if (snapshot.editor) return ":%s#old#new#g";
+  if (snapshot.editor) return "";
   return "kubectl get pods -A";
+}
+
+function editorRowCount(buffer) {
+  return Math.min(Math.max(String(buffer ?? "").split("\n").length + 1, 18), 32);
 }
 
 export default function App() {
@@ -82,6 +86,7 @@ export default function App() {
   const [activeId, setActiveId] = useState(questions[0]?.id ?? null);
   const [history, setHistory] = useState(() => []);
   const [input, setInput] = useState("");
+  const [editorDraft, setEditorDraft] = useState("");
   const [snapshot, setSnapshot] = useState(() => session.getSnapshot());
   const [showHints, setShowHints] = useState(false);
   const [attemptedIds, setAttemptedIds] = useState(() => new Set());
@@ -90,6 +95,7 @@ export default function App() {
     () => typeof window === "undefined" || window.matchMedia("(min-width: 881px)").matches,
   );
   const terminalOutputRef = useRef(null);
+  const editorBufferRef = useRef(null);
 
   const activeQuestion = questions.find((question) => question.id === activeId) ?? questions[0] ?? null;
   const activeIndex = activeQuestion
@@ -118,13 +124,27 @@ export default function App() {
     [input, isEditorActive, snapshot.cwd, snapshot.files],
   );
   const inputRows = isEditorInsert
-    ? Math.min(Math.max(input.split("\n").length, 5), 14)
+    ? 1
     : Math.min(Math.max(input.split("\n").length, 1), 8);
+  const editorName = snapshot.editor ? basename(snapshot.editor.path) : "";
+  const editorDirtyMark = snapshot.editor?.dirty ? " [+]" : "";
+  const editorModeLabel = isEditorInsert ? "-- INSERT --" : "-- NORMAL --";
+  const editorSize = snapshot.editor
+    ? `${snapshot.editor.buffer.split("\n").length}L, ${snapshot.editor.buffer.length}B`
+    : "";
 
   useEffect(() => {
     const output = terminalOutputRef.current;
     if (output) output.scrollTop = output.scrollHeight;
   }, [history]);
+
+  useEffect(() => {
+    setEditorDraft(snapshot.editor?.buffer ?? "");
+  }, [snapshot.editor?.path, snapshot.editor?.mode, snapshot.editor?.buffer]);
+
+  useEffect(() => {
+    if (isEditorInsert) editorBufferRef.current?.focus();
+  }, [isEditorInsert]);
 
   useEffect(() => {
     setCompletionIndex(0);
@@ -144,9 +164,10 @@ export default function App() {
     for (const [index, command] of commands.entries()) {
       const wasEditorActive = Boolean(nextSnapshot.editor);
       const result = session.runCommand(command);
+      const opensEditor = !wasEditorActive && Boolean(result.editor);
       entries.push({
         command: labels[index] ?? command,
-        output: result.output,
+        output: opensEditor ? "" : result.output,
         prompt: nextSnapshot.prompt,
         clear: !wasEditorActive && command === "clear",
       });
@@ -174,9 +195,33 @@ export default function App() {
 
   function submitCommand(event) {
     event.preventDefault();
+    if (isEditorInsert) return;
     const commands = isEditorActive ? [input] : splitSubmittedCommands(input);
-    if (!commands.length || (isEditorInsert && input.length === 0)) return;
+    if (!commands.length) return;
     runCommands(commands);
+  }
+
+  function syncEditorDraft() {
+    if (!snapshot.editor) return snapshot;
+    const nextSnapshot = session.updateEditorBuffer(editorDraft);
+    setSnapshot(nextSnapshot);
+    return nextSnapshot;
+  }
+
+  function leaveEditorInsertMode() {
+    if (!snapshot.editor) return;
+    const before = syncEditorDraft();
+    session.runCommand("\u001b");
+    const nextSnapshot = session.getSnapshot();
+    setSnapshot(nextSnapshot);
+    setHistory((items) => [
+      ...items,
+      {
+        command: "Esc",
+        output: "",
+        prompt: before.prompt,
+      },
+    ]);
   }
 
   function handleCommandKeyDown(event) {
@@ -196,21 +241,17 @@ export default function App() {
       setCompletionIndex((index) => (index - 1 + completions.length) % completions.length);
       return;
     }
-    if (isEditorInsert && event.key === "Escape") {
-      event.preventDefault();
-      runCommands(["\u001b"], ["Esc"]);
-      return;
-    }
-    if (isEditorInsert) {
-      if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-        event.preventDefault();
-        event.currentTarget.form?.requestSubmit();
-      }
-      return;
-    }
     if (event.key !== "Enter" || event.shiftKey) return;
     event.preventDefault();
     event.currentTarget.form?.requestSubmit();
+  }
+
+  function handleEditorBufferKeyDown(event) {
+    if (event.nativeEvent.isComposing) return;
+    if (isEditorInsert && event.key === "Escape") {
+      event.preventDefault();
+      leaveEditorInsertMode();
+    }
   }
 
   function resetCurrentQuestion() {
@@ -219,6 +260,8 @@ export default function App() {
     session.resetQuestion(activeQuestion.id);
     const nextSnapshot = session.getSnapshot();
     setSnapshot(nextSnapshot);
+    setInput("");
+    setEditorDraft("");
     setAttemptedIds((ids) => {
       const next = new Set(ids);
       next.delete(activeQuestion.id);
@@ -240,6 +283,7 @@ export default function App() {
     setSnapshot(nextSession.getSnapshot());
     setHistory([]);
     setInput("");
+    setEditorDraft("");
     setShowHints(false);
     setAttemptedIds(new Set());
   }
@@ -410,57 +454,92 @@ export default function App() {
               <span className="terminal-context">{snapshot.context}</span>
             </div>
             <div className="terminal-output" role="log" aria-live="polite" ref={terminalOutputRef}>
-              {history.map((entry, index) => (
-                <div key={`${entry.command}-${index}`} className="terminal-entry">
-                  {entry.command ? (
-                    <div className="prompt-line">
-                      <span>{entry.prompt}</span>
-                      <code>{entry.command}</code>
+              {isEditorActive ? (
+                <div className={`vim-screen ${isEditorInsert ? "insert-mode" : "normal-mode"}`}>
+                  <textarea
+                    ref={editorBufferRef}
+                    className="vim-buffer-editor"
+                    value={editorDraft}
+                    rows={editorRowCount(editorDraft)}
+                    readOnly={!isEditorInsert}
+                    onChange={(event) => setEditorDraft(event.target.value)}
+                    onKeyDown={handleEditorBufferKeyDown}
+                    spellCheck={false}
+                    aria-label="vim 파일 버퍼"
+                  />
+                  <div className="vim-statusline">
+                    <span>
+                      "{editorName}"{editorDirtyMark}
+                    </span>
+                    <span>{editorSize}</span>
+                    <strong>{editorModeLabel}</strong>
+                  </div>
+                  {!isEditorInsert ? (
+                    <form className="vim-command-line" onSubmit={submitCommand}>
+                      <textarea
+                        value={input}
+                        rows={1}
+                        onChange={(event) => setInput(event.target.value)}
+                        onKeyDown={handleCommandKeyDown}
+                        autoFocus={shouldAutoFocusTerminal}
+                        spellCheck={false}
+                        aria-label="vim 명령 입력"
+                        placeholder={commandInputPlaceholder(snapshot)}
+                      />
+                      <button type="submit" aria-label="vim 명령 실행" title="Run vim command">
+                        <Play size={15} />
+                      </button>
+                    </form>
+                  ) : null}
+                </div>
+              ) : (
+                <>
+                  {history.map((entry, index) => (
+                    <div key={`${entry.command}-${index}`} className="terminal-entry">
+                      {entry.command ? (
+                        <div className="prompt-line">
+                          <span>{entry.prompt}</span>
+                          <code>{entry.command}</code>
+                        </div>
+                      ) : null}
+                      {entry.output ? <pre>{entry.output}</pre> : null}
+                    </div>
+                  ))}
+                  {completions.length ? (
+                    <div className="completion-menu" role="listbox" aria-label="cd 자동완성 후보">
+                      {completions.map((completion, index) => (
+                        <button
+                          key={completion.replacement}
+                          type="button"
+                          className={index === completionIndex ? "active" : ""}
+                          onMouseDown={(event) => {
+                            event.preventDefault();
+                            applyCompletion(completion);
+                          }}
+                        >
+                          {completion.label}
+                        </button>
+                      ))}
                     </div>
                   ) : null}
-                  {entry.output ? <pre>{entry.output}</pre> : null}
-                </div>
-              ))}
-              {completions.length ? (
-                <div className="completion-menu" role="listbox" aria-label="cd 자동완성 후보">
-                  {completions.map((completion, index) => (
-                    <button
-                      key={completion.replacement}
-                      type="button"
-                      className={index === completionIndex ? "active" : ""}
-                      onMouseDown={(event) => {
-                        event.preventDefault();
-                        applyCompletion(completion);
-                      }}
-                    >
-                      {completion.label}
+                  <form className="command-line" onSubmit={submitCommand}>
+                    <span>{snapshot.prompt}</span>
+                    <textarea
+                      value={input}
+                      rows={inputRows}
+                      onChange={(event) => setInput(event.target.value)}
+                      onKeyDown={handleCommandKeyDown}
+                      autoFocus={shouldAutoFocusTerminal}
+                      spellCheck={false}
+                      aria-label="터미널 명령 입력"
+                      placeholder={commandInputPlaceholder(snapshot)}
+                    />
+                    <button type="submit" aria-label="명령 실행" title="Run command">
+                      <Play size={15} />
                     </button>
-                  ))}
-                </div>
-              ) : null}
-              <form
-                className={`command-line ${isEditorActive ? "editor-mode" : ""} ${isEditorInsert ? "insert-mode" : ""}`}
-                onSubmit={submitCommand}
-              >
-                <span>{snapshot.prompt}</span>
-                <textarea
-                  value={input}
-                  rows={inputRows}
-                  onChange={(event) => setInput(event.target.value)}
-                  onKeyDown={handleCommandKeyDown}
-                  autoFocus={shouldAutoFocusTerminal}
-                  spellCheck={false}
-                  aria-label={isEditorActive ? "vim 명령 입력" : "터미널 명령 입력"}
-                  placeholder={commandInputPlaceholder(snapshot)}
-                />
-                <button
-                  type="submit"
-                  aria-label={isEditorActive ? "vim 명령 실행" : "명령 실행"}
-                  title={isEditorActive ? "Run vim command" : "Run command"}
-                >
-                  <Play size={15} />
-                </button>
-              </form>
+                  </form>
+                </>
+              )}
             </div>
           </article>
         </section>

@@ -13,7 +13,13 @@ describe("app shell copy", () => {
 
   it("shows vim-specific input affordances while the editor is active", () => {
     expect(commandInputPlaceholder({ editor: null })).toBe("kubectl get pods -A");
-    expect(commandInputPlaceholder({ editor: { mode: "normal" } })).toBe(":%s#old#new#g");
+    expect(commandInputPlaceholder({ editor: { mode: "normal" } })).toBe("");
     expect(commandInputPlaceholder({ editor: { mode: "insert" } })).toBe("");
+  });
+
+  it("renders vim as a file editor surface instead of a shell placeholder", () => {
+    expect(appSource).toContain("vim-buffer-editor");
+    expect(appSource).toContain("updateEditorBuffer");
+    expect(appSource).not.toContain(":%s#old#new#g");
   });
 });

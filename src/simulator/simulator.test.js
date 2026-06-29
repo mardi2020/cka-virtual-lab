@@ -638,6 +638,24 @@ EOF`);
     expect(session.getSnapshot().editor).toMatchObject({ path: "/home/candidate/manifests/billing-broken" });
   });
 
+  it("allows the UI to edit the live vim buffer before writing it", () => {
+    const session = createLabSession({ questions, initialCluster: createInitialCluster() });
+
+    session.runCommand("vim /home/candidate/manifests/billing-broken");
+    session.runCommand("i");
+    const edited = session
+      .getSnapshot()
+      .editor.buffer.replace("registry.local/billing:broken", "nginx:1.27");
+
+    expect(session.updateEditorBuffer(edited).editor.dirty).toBe(true);
+    session.runCommand("Esc");
+    session.runCommand(":wq");
+
+    expect(session.runCommand("cat /home/candidate/manifests/billing-broken").output).toContain(
+      "image: nginx:1.27",
+    );
+  });
+
   it("starts with the practice questions unsolved", () => {
     const session = createLabSession({ questions, initialCluster: createInitialCluster() });
     const solved = questions.filter((question) => gradeQuestion(question, session.getSnapshot()).passed);

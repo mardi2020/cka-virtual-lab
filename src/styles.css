@@ -96,7 +96,8 @@ textarea:focus-visible {
 .section-kicker,
 .task-actions button,
 .terminal-title,
-.command-line {
+.command-line,
+.vim-command-line {
   display: flex;
   align-items: center;
 }
@@ -574,6 +575,93 @@ textarea:focus-visible {
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 13px;
   line-height: 1.5;
+}
+
+.vim-screen {
+  display: grid;
+  min-height: calc(100% + 32px);
+  margin: -16px;
+  background: #020403;
+}
+
+.vim-buffer-editor {
+  width: 100%;
+  min-width: 0;
+  min-height: 420px;
+  resize: none;
+  padding: 16px;
+  color: #d7f6df;
+  caret-color: transparent;
+  border: 0;
+  outline: 0;
+  appearance: none;
+  background: #020403;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  tab-size: 2;
+}
+
+.vim-buffer-editor::-webkit-resizer {
+  display: none;
+}
+
+.vim-screen.insert-mode .vim-buffer-editor {
+  color: #fff4d5;
+  caret-color: var(--amber);
+}
+
+.vim-statusline {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 30px;
+  padding: 0 12px;
+  color: #06100d;
+  background: var(--green);
+  font-weight: 700;
+}
+
+.vim-statusline strong {
+  margin-left: auto;
+}
+
+.vim-command-line {
+  gap: 8px;
+  padding: 10px 12px 14px;
+  border-top: 1px solid rgba(55, 217, 155, 0.24);
+  background: #020403;
+}
+
+.vim-command-line textarea {
+  width: 100%;
+  min-width: 0;
+  resize: none;
+  color: #f3fbf7;
+  caret-color: var(--green);
+  border: 0;
+  outline: 0;
+  appearance: none;
+  background: transparent;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.vim-command-line textarea::-webkit-resizer {
+  display: none;
+}
+
+.vim-command-line button {
+  display: grid;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  color: #08100d;
+  border: 1px solid rgba(55, 217, 155, 0.7);
+  border-radius: 8px;
+  background: var(--green);
 }
 
 .terminal-entry pre {
