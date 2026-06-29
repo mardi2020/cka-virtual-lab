@@ -113,7 +113,7 @@ function runEditorCommand(commandText, state) {
   const substitution = parseSubstitutionCommand(command);
   if (substitution) return runEditorSubstitution(substitution, state);
   if (command === ":w") return saveEditor(state, false);
-  if (command === ":wq" || command === ":x" || command === "ZZ") return saveEditor(state, true);
+  if (command === ":wq" || command === ":wq!" || command === ":x" || command === "ZZ") return saveEditor(state, true);
   if (command === ":q!") {
     return ok(`"${basename(state.editor.path)}" aborted`, state.cluster, state.files, state.cwd, state.context, null);
   }

@@ -656,6 +656,19 @@ EOF`);
     );
   });
 
+  it("supports force write-quit in vim", () => {
+    const session = createLabSession({ questions, initialCluster: createInitialCluster() });
+
+    session.runCommand("vim /home/candidate/manifests/billing-broken");
+    session.runCommand(":%s#registry.local/billing:broken#nginx:1.27#g");
+
+    expect(session.runCommand(":wq!").output).toContain("\"billing-broken\" written");
+    expect(session.getSnapshot().editor).toBeNull();
+    expect(session.runCommand("cat /home/candidate/manifests/billing-broken").output).toContain(
+      "image: nginx:1.27",
+    );
+  });
+
   it("starts with the practice questions unsolved", () => {
     const session = createLabSession({ questions, initialCluster: createInitialCluster() });
     const solved = questions.filter((question) => gradeQuestion(question, session.getSnapshot()).passed);
