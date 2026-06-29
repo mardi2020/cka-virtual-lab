@@ -8,4 +8,8 @@ describe("terminal input styling", () => {
     expect(styles).toMatch(/\.command-line textarea\s*\{[\s\S]*resize:\s*none;/);
     expect(styles).toMatch(/\.command-line textarea::-webkit-resizer\s*\{[\s\S]*display:\s*none;/);
   });
+
+  it("keeps the vim status line from stretching into the editor body", () => {
+    expect(styles).toMatch(/\.vim-screen\s*\{[\s\S]*grid-template-rows:\s*minmax\(0,\s*1fr\)\s+auto\s+auto;/);
+  });
 });

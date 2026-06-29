@@ -77,6 +77,12 @@ export function commandInputPlaceholder(snapshot) {
   return "kubectl get pods -A";
 }
 
+export function vimNormalKeyAction(key) {
+  if (key === "i" || key === "a") return { type: "command", command: key };
+  if (key === ":") return { type: "commandLine", value: ":" };
+  return null;
+}
+
 function editorRowCount(buffer) {
   return Math.min(Math.max(String(buffer ?? "").split("\n").length + 1, 18), 32);
 }
@@ -96,6 +102,7 @@ export default function App() {
   );
   const terminalOutputRef = useRef(null);
   const editorBufferRef = useRef(null);
+  const vimCommandRef = useRef(null);
 
   const activeQuestion = questions.find((question) => question.id === activeId) ?? questions[0] ?? null;
   const activeIndex = activeQuestion
@@ -143,8 +150,8 @@ export default function App() {
   }, [snapshot.editor?.path, snapshot.editor?.mode, snapshot.editor?.buffer]);
 
   useEffect(() => {
-    if (isEditorInsert) editorBufferRef.current?.focus();
-  }, [isEditorInsert]);
+    if (isEditorActive) editorBufferRef.current?.focus();
+  }, [isEditorActive, isEditorInsert, snapshot.editor?.path]);
 
   useEffect(() => {
     setCompletionIndex(0);
@@ -226,6 +233,12 @@ export default function App() {
 
   function handleCommandKeyDown(event) {
     if (event.nativeEvent.isComposing) return;
+    if (isEditorActive && event.key === "Escape") {
+      event.preventDefault();
+      setInput("");
+      editorBufferRef.current?.focus();
+      return;
+    }
     if (!isEditorActive && completions.length && event.key === "Tab") {
       event.preventDefault();
       applyCompletion();
@@ -251,6 +264,25 @@ export default function App() {
     if (isEditorInsert && event.key === "Escape") {
       event.preventDefault();
       leaveEditorInsertMode();
+      return;
+    }
+    if (isEditorInsert) return;
+
+    const action = vimNormalKeyAction(event.key);
+    if (!action) return;
+
+    event.preventDefault();
+    if (action.type === "command") {
+      runCommands([action.command]);
+      return;
+    }
+    setInput(action.value);
+    requestAnimationFrame(() => vimCommandRef.current?.focus());
+  }
+
+  function handleEditorBufferMouseDown() {
+    if (!isEditorInsert) {
+      requestAnimationFrame(() => editorBufferRef.current?.focus());
     }
   }
 
@@ -464,6 +496,7 @@ export default function App() {
                     readOnly={!isEditorInsert}
                     onChange={(event) => setEditorDraft(event.target.value)}
                     onKeyDown={handleEditorBufferKeyDown}
+                    onMouseDown={handleEditorBufferMouseDown}
                     spellCheck={false}
                     aria-label="vim 파일 버퍼"
                   />
@@ -477,11 +510,11 @@ export default function App() {
                   {!isEditorInsert ? (
                     <form className="vim-command-line" onSubmit={submitCommand}>
                       <textarea
+                        ref={vimCommandRef}
                         value={input}
                         rows={1}
                         onChange={(event) => setInput(event.target.value)}
                         onKeyDown={handleCommandKeyDown}
-                        autoFocus={shouldAutoFocusTerminal}
                         spellCheck={false}
                         aria-label="vim 명령 입력"
                         placeholder={commandInputPlaceholder(snapshot)}
