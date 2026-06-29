@@ -131,7 +131,7 @@ function runEditorCommand(commandText, state) {
     return ok(`"${basename(state.editor.path)}" closed`, state.cluster, state.files, state.cwd, state.context, null);
   }
 
-  return ok(`vim: ${command}: command not simulated`, state.cluster, state.files, state.cwd, state.context, state.editor);
+  return ok(`E492: Not an editor command: ${command}`, state.cluster, state.files, state.cwd, state.context, state.editor);
 }
 
 function runEditorSubstitution(substitution, state) {

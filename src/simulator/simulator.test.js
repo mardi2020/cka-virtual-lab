@@ -629,6 +629,15 @@ EOF`);
     );
   });
 
+  it("keeps shell commands from looking runnable while vim is active", () => {
+    const session = createLabSession({ questions, initialCluster: createInitialCluster() });
+
+    session.runCommand("vim /home/candidate/manifests/billing-broken");
+
+    expect(session.runCommand("kubectl get po").output).toBe("E492: Not an editor command: kubectl get po");
+    expect(session.getSnapshot().editor).toMatchObject({ path: "/home/candidate/manifests/billing-broken" });
+  });
+
   it("starts with the practice questions unsolved", () => {
     const session = createLabSession({ questions, initialCluster: createInitialCluster() });
     const solved = questions.filter((question) => gradeQuestion(question, session.getSnapshot()).passed);

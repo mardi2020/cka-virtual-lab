@@ -71,6 +71,12 @@ function scoreForDomain(domainName, gradedQuestions) {
   );
 }
 
+export function commandInputPlaceholder(snapshot) {
+  if (snapshot.editor?.mode === "insert") return "";
+  if (snapshot.editor) return ":%s#old#new#g";
+  return "kubectl get pods -A";
+}
+
 export default function App() {
   const [session, setSession] = useState(() => createSession());
   const [activeId, setActiveId] = useState(questions[0]?.id ?? null);
@@ -444,10 +450,14 @@ export default function App() {
                   onKeyDown={handleCommandKeyDown}
                   autoFocus={shouldAutoFocusTerminal}
                   spellCheck={false}
-                  aria-label="터미널 명령 입력"
-                  placeholder={isEditorInsert ? "" : "kubectl get pods -A"}
+                  aria-label={isEditorActive ? "vim 명령 입력" : "터미널 명령 입력"}
+                  placeholder={commandInputPlaceholder(snapshot)}
                 />
-                <button type="submit" aria-label="명령 실행" title="Run command">
+                <button
+                  type="submit"
+                  aria-label={isEditorActive ? "vim 명령 실행" : "명령 실행"}
+                  title={isEditorActive ? "Run vim command" : "Run command"}
+                >
                   <Play size={15} />
                 </button>
               </form>
